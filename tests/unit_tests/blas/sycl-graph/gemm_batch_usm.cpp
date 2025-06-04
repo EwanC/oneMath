@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2020-2021 Intel Corporation
+* Copyright 2025 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -41,14 +41,11 @@
 #include <gtest/gtest.h>
 
 using namespace sycl;
-using std::vector;
-
 extern std::vector<sycl::device*> devices;
 
 namespace {
-
 template <typename Ta, typename Tb, typename Tc, typename Ts>
-int test(device* dev, oneapi::math::layout layout, int64_t group_count) {
+int test(device* dev, oneapi::math::layout layout) {
     // Catch asynchronous exceptions.
     auto exception_handler = [](exception_list exceptions) {
         for (std::exception_ptr const& e : exceptions) {
@@ -70,15 +67,17 @@ int test(device* dev, oneapi::math::layout layout, int64_t group_count) {
 
     // Prepare data.
     auto uaint = usm_allocator<int64_t, usm::alloc::shared, 64>(cxt, *dev);
-    vector<int64_t, decltype(uaint)> m(uaint), n(uaint), k(uaint), lda(uaint), ldb(uaint),
+    std::vector<int64_t, decltype(uaint)> m(uaint), n(uaint), k(uaint), lda(uaint), ldb(uaint),
         ldc(uaint), group_size(uaint);
 
     auto uatranspose = usm_allocator<oneapi::math::transpose, usm::alloc::shared, 64>(cxt, *dev);
-    vector<oneapi::math::transpose, decltype(uatranspose)> transa(uatranspose), transb(uatranspose);
+    std::vector<oneapi::math::transpose, decltype(uatranspose)> transa(uatranspose),
+        transb(uatranspose);
 
     auto uaTs = usm_allocator<Ts, usm::alloc::shared, 64>(cxt, *dev);
-    vector<Ts, decltype(uaTs)> alpha(uaTs), beta(uaTs);
+    std::vector<Ts, decltype(uaTs)> alpha(uaTs), beta(uaTs);
 
+    int64_t group_count = 5;
     m.resize(group_count);
     n.resize(group_count);
     k.resize(group_count);
@@ -130,10 +129,10 @@ int test(device* dev, oneapi::math::layout layout, int64_t group_count) {
     auto uaTbp = usm_allocator<Tb*, usm::alloc::shared, 64>(cxt, *dev);
     auto uaTcp = usm_allocator<Tc*, usm::alloc::shared, 64>(cxt, *dev);
     auto uaTsp = usm_allocator<Ts*, usm::alloc::shared, 64>(cxt, *dev);
-    vector<Ta*, decltype(uaTap)> a_array(uaTap);
-    vector<Tb*, decltype(uaTbp)> b_array(uaTbp);
-    vector<Tc*, decltype(uaTcp)> c_array(uaTcp), c_cast_ref_array(uaTcp);
-    vector<Ts*, decltype(uaTsp)> a_ref_array(uaTsp), b_ref_array(uaTsp), c_ref_array(uaTsp);
+    std::vector<Ta*, decltype(uaTap)> a_array(uaTap);
+    std::vector<Tb*, decltype(uaTbp)> b_array(uaTbp);
+    std::vector<Tc*, decltype(uaTcp)> c_array(uaTcp), c_cast_ref_array(uaTcp);
+    std::vector<Ts*, decltype(uaTsp)> a_ref_array(uaTsp), b_ref_array(uaTsp), c_ref_array(uaTsp);
     a_array.resize(total_batch_count);
     b_array.resize(total_batch_count);
     c_array.resize(total_batch_count);
@@ -247,6 +246,12 @@ int test(device* dev, oneapi::math::layout layout, int64_t group_count) {
 
     try {
 #ifdef CALL_RT_API
+#ifdef SYCL_EXT_ONEAPI_GRAPH
+        namespace sycl_exp = sycl::ext::oneapi::experimental;
+        using modifiable_graph = sycl_exp::command_graph<sycl_exp::graph_state::modifiable>;
+        std::unique_ptr<modifiable_graph> graph = std::make_unique<modifiable_graph>(main_queue);
+        graph->begin_recording(main_queue);
+#endif
         switch (layout) {
             case oneapi::math::layout::col_major:
                 done = oneapi::math::blas::column_major::gemm_batch(
@@ -262,7 +267,12 @@ int test(device* dev, oneapi::math::layout layout, int64_t group_count) {
                 break;
             default: break;
         }
-        done.wait_and_throw();
+
+#ifdef SYCL_EXT_ONEAPI_GRAPH
+        graph->end_recording(main_queue);
+        auto exec_graph = graph->finalize();
+        main_queue.ext_oneapi_graph(exec_graph).wait_and_throw();
+#endif
 #else
         switch (layout) {
             case oneapi::math::layout::col_major:
@@ -364,59 +374,21 @@ int test(device* dev, oneapi::math::layout layout, int64_t group_count) {
     return (int)good;
 }
 
-class GemmBatchUsmTests
-        : public ::testing::TestWithParam<std::tuple<sycl::device*, oneapi::math::layout>> {};
+class GraphGemmBatchUsmTests
+        : public ::testing::TestWithParam<std::tuple<sycl::device*, oneapi::math::layout>> {
+    virtual void SetUp() override {
+        // Skip test if graph recording variant and device doesn't support sycl_ext_oneapi_graph
+        CHECK_GRAPH_ON_DEVICE(std::get<0>(GetParam()));
+    }
+};
 
-TEST_P(GemmBatchUsmTests, RealHalfPrecision) {
-    EXPECT_TRUEORSKIP((test<sycl::half, sycl::half, sycl::half, sycl::half>(
-        std::get<0>(GetParam()), std::get<1>(GetParam()), 5)));
-}
-
-TEST_P(GemmBatchUsmTests, HalfHalfFloatPrecision) {
-    EXPECT_TRUEORSKIP((test<sycl::half, sycl::half, float, float>(std::get<0>(GetParam()),
-                                                                  std::get<1>(GetParam()), 5)));
-}
-
-TEST_P(GemmBatchUsmTests, Int8Int8SinglePrecision) {
-    EXPECT_TRUEORSKIP((test<std::int8_t, std::int8_t, float, float>(std::get<0>(GetParam()),
-                                                                    std::get<1>(GetParam()), 5)));
-}
-
-TEST_P(GemmBatchUsmTests, Int8Int8Int32Precision) {
-    EXPECT_TRUEORSKIP((test<std::int8_t, std::int8_t, std::int32_t, float>(
-        std::get<0>(GetParam()), std::get<1>(GetParam()), 5)));
-}
-
-TEST_P(GemmBatchUsmTests, RealSinglePrecision) {
+TEST_P(GraphGemmBatchUsmTests, RealSinglePrecision) {
     EXPECT_TRUEORSKIP(
-        (test<float, float, float, float>(std::get<0>(GetParam()), std::get<1>(GetParam()), 5)));
+        (test<float, float, float, float>(std::get<0>(GetParam()), std::get<1>(GetParam()))));
 }
 
-TEST_P(GemmBatchUsmTests, RealDoublePrecision) {
-    CHECK_DOUBLE_ON_DEVICE(std::get<0>(GetParam()));
-
-    EXPECT_TRUEORSKIP((
-        test<double, double, double, double>(std::get<0>(GetParam()), std::get<1>(GetParam()), 5)));
-}
-
-TEST_P(GemmBatchUsmTests, ComplexSinglePrecision) {
-    EXPECT_TRUEORSKIP(
-        (test<std::complex<float>, std::complex<float>, std::complex<float>, std::complex<float>>(
-            std::get<0>(GetParam()), std::get<1>(GetParam()), 5)));
-}
-
-TEST_P(GemmBatchUsmTests, ComplexDoublePrecision) {
-    CHECK_DOUBLE_ON_DEVICE(std::get<0>(GetParam()));
-
-    EXPECT_TRUEORSKIP(
-        (test<std::complex<double>, std::complex<double>, std::complex<double>,
-              std::complex<double>>(std::get<0>(GetParam()), std::get<1>(GetParam()), 5)));
-}
-
-INSTANTIATE_TEST_SUITE_P(GemmBatchUsmTestSuite, GemmBatchUsmTests,
+INSTANTIATE_TEST_SUITE_P(GraphGemmBatchUsmTestSuite, GraphGemmBatchUsmTests,
                          ::testing::Combine(testing::ValuesIn(devices),
-                                            testing::Values(oneapi::math::layout::col_major,
-                                                            oneapi::math::layout::row_major)),
+                                            testing::Values(oneapi::math::layout::col_major)),
                          ::LayoutDeviceNamePrint());
-
 } // anonymous namespace
